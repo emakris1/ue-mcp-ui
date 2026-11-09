@@ -13,26 +13,26 @@ struct FSlateBrush;
 class SMCPServerStatusBar : public SCompoundWidget
 {
 public:
-	SLATE_BEGIN_ARGS(SMCPServerStatusBar) {}
-	SLATE_END_ARGS()
+  SLATE_BEGIN_ARGS(SMCPServerStatusBar) {}
+  SLATE_END_ARGS()
 
-	void Construct(const FArguments& InArgs, const TSharedRef<FMCPServerController>& InController);
+  void Construct(const FArguments& InArgs, const TSharedRef<FMCPServerController>& InController);
 
 private:
-	FReply OnToggleClicked();
-	FReply OnPortClicked();
+  FReply OnToggleClicked();
+  FReply OnPortClicked();
 
-	bool IsToggleEnabled() const;
-	const FSlateBrush* GetToggleIcon() const;
-	FText GetToggleLabel() const;
-	FText GetToggleToolTip() const;
+  bool IsToggleEnabled() const;
+  const FSlateBrush* GetToggleIcon() const;
+  FText GetToggleLabel() const;
+  FText GetToggleToolTip() const;
 
-	FSlateColor GetStatusColor() const;
-	FText GetStatusLabel() const;
-	FText GetStatusToolTip() const;
+  FSlateColor GetStatusColor() const;
+  FText GetStatusLabel() const;
+  FText GetStatusToolTip() const;
 
-	FText GetPortLabel() const;
-	FText GetPortToolTip() const;
+  FText GetPortLabel() const;
+  FText GetPortToolTip() const;
 
-	TWeakPtr<FMCPServerController> Controller;
+  TWeakPtr<FMCPServerController> Controller;
 };

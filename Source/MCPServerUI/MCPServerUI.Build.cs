@@ -4,22 +4,22 @@ using UnrealBuildTool;
 
 public class MCPServerUI : ModuleRules
 {
-	public MCPServerUI(ReadOnlyTargetRules Target) : base(Target)
-	{
-		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+  public MCPServerUI(ReadOnlyTargetRules Target) : base(Target)
+  {
+    PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		PrivateDependencyModuleNames.AddRange(new string[]
-		{
-			"Core",
-			"CoreUObject",
-			"Engine",
-			"InputCore",
-			"Projects",
-			"Slate",
-			"SlateCore",
-			"Sockets",
-			"ToolMenus",
-			"UnrealEd",
-		});
-	}
+    PrivateDependencyModuleNames.AddRange(new string[]
+    {
+      "Core",
+      "CoreUObject",
+      "Engine",
+      "InputCore",
+      "Projects",
+      "Slate",
+      "SlateCore",
+      "Sockets",
+      "ToolMenus",
+      "UnrealEd",
+    });
+  }
 }

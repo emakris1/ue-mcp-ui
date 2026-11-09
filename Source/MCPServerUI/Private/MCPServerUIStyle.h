@@ -9,12 +9,12 @@
 class FMCPServerUIStyle
 {
 public:
-	static void Initialize();
-	static void Shutdown();
+  static void Initialize();
+  static void Shutdown();
 
-	static const ISlateStyle& Get();
-	static FName GetStyleSetName();
+  static const ISlateStyle& Get();
+  static FName GetStyleSetName();
 
 private:
-	static TSharedPtr<FSlateStyleSet> StyleSet;
+  static TSharedPtr<FSlateStyleSet> StyleSet;
 };

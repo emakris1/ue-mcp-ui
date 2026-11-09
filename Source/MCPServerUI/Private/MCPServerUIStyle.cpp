@@ -11,47 +11,47 @@ TSharedPtr<FSlateStyleSet> FMCPServerUIStyle::StyleSet;
 
 void FMCPServerUIStyle::Initialize()
 {
-	if (StyleSet.IsValid())
-	{
-		return;
-	}
+  if (StyleSet.IsValid())
+  {
+    return;
+  }
 
-	StyleSet = MakeShared<FSlateStyleSet>(GetStyleSetName());
+  StyleSet = MakeShared<FSlateStyleSet>(GetStyleSetName());
 
-	if (const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("MCPServerUI")))
-	{
-		StyleSet->SetContentRoot(Plugin->GetBaseDir() / TEXT("Resources"));
-	}
+  if (const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("MCPServerUI")))
+  {
+    StyleSet->SetContentRoot(Plugin->GetBaseDir() / TEXT("Resources"));
+  }
 
-	const FVector2D Icon16x16(16.0, 16.0);
-	StyleSet->Set("MCPServerUI.Start", new FSlateVectorImageBrush(StyleSet->RootToContentDir(TEXT("Icons/Start"), TEXT(".svg")), Icon16x16));
-	StyleSet->Set("MCPServerUI.Stop", new FSlateVectorImageBrush(StyleSet->RootToContentDir(TEXT("Icons/Stop"), TEXT(".svg")), Icon16x16));
-	StyleSet->Set("MCPServerUI.Port", new FSlateVectorImageBrush(StyleSet->RootToContentDir(TEXT("Icons/Port"), TEXT(".svg")), Icon16x16));
+  const FVector2D Icon16x16(16.0, 16.0);
+  StyleSet->Set("MCPServerUI.Start", new FSlateVectorImageBrush(StyleSet->RootToContentDir(TEXT("Icons/Start"), TEXT(".svg")), Icon16x16));
+  StyleSet->Set("MCPServerUI.Stop", new FSlateVectorImageBrush(StyleSet->RootToContentDir(TEXT("Icons/Stop"), TEXT(".svg")), Icon16x16));
+  StyleSet->Set("MCPServerUI.Port", new FSlateVectorImageBrush(StyleSet->RootToContentDir(TEXT("Icons/Port"), TEXT(".svg")), Icon16x16));
 
-	// White dot, tinted at runtime to reflect the server state.
-	StyleSet->Set("MCPServerUI.StatusDot", new FSlateRoundedBoxBrush(FLinearColor::White, 4.0f, FVector2f(8.0f, 8.0f)));
+  // White dot, tinted at runtime to reflect the server state.
+  StyleSet->Set("MCPServerUI.StatusDot", new FSlateRoundedBoxBrush(FLinearColor::White, 4.0f, FVector2f(8.0f, 8.0f)));
 
-	FSlateStyleRegistry::RegisterSlateStyle(*StyleSet);
+  FSlateStyleRegistry::RegisterSlateStyle(*StyleSet);
 }
 
 void FMCPServerUIStyle::Shutdown()
 {
-	if (StyleSet.IsValid())
-	{
-		FSlateStyleRegistry::UnRegisterSlateStyle(*StyleSet);
-		ensure(StyleSet.IsUnique());
-		StyleSet.Reset();
-	}
+  if (StyleSet.IsValid())
+  {
+    FSlateStyleRegistry::UnRegisterSlateStyle(*StyleSet);
+    ensure(StyleSet.IsUnique());
+    StyleSet.Reset();
+  }
 }
 
 const ISlateStyle& FMCPServerUIStyle::Get()
 {
-	check(StyleSet.IsValid());
-	return *StyleSet;
+  check(StyleSet.IsValid());
+  return *StyleSet;
 }
 
 FName FMCPServerUIStyle::GetStyleSetName()
 {
-	static const FName StyleSetName(TEXT("MCPServerUIStyle"));
-	return StyleSetName;
+  static const FName StyleSetName(TEXT("MCPServerUIStyle"));
+  return StyleSetName;
 }
