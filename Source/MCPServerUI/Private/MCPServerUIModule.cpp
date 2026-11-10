@@ -10,8 +10,9 @@
 
 namespace MCPServerUI::Private
 {
-  /** The tool bar on the right side of the editor status bar (Revision Control, Diagnostics, ...). */
-  static const FName StatusBarToolBarName(TEXT("StatusBar.ToolBar"));
+  // Each status bar names its tool bar menu after its drawer (see SStatusBar::GetToolbarName), so this targets only the
+  // main level editor's status bar. That's also where Diagnostics, Trace and Revision Control live.
+  static const FName LevelEditorStatusBarToolBarName(TEXT("LevelEditor.StatusBar.ToolBar"));
   static const FName SectionName(TEXT("MCPServerUI"));
   static const FName EntryName(TEXT("MCPServerControls"));
 }
@@ -24,24 +25,25 @@ public:
     FMCPServerUIStyle::Initialize();
 
     Controller = MakeShared<FMCPServerController>();
-    Controller->Initialize();
 
-    UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FMCPServerUIModule::RegisterStatusBarExtension));
+    UToolMenus::RegisterStartupCallback(
+      FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FMCPServerUIModule::RegisterStatusBarExtension));
 
     if (GIsRunning)
     {
-      // Enabled after editor startup: everything else is already loaded.
-      OnPostEngineInit();
+      // Enabled from the Plugins window after startup, so PostEngineInit has already fired.
+      MoveSectionToFront();
     }
     else
     {
-      PostEngineInitHandle = FCoreDelegates::OnPostEngineInit.AddRaw(this, &FMCPServerUIModule::OnPostEngineInit);
+      PostEngineInitHandle =
+        FCoreDelegates::GetOnPostEngineInit().AddRaw(this, &FMCPServerUIModule::MoveSectionToFront);
     }
   }
 
   virtual void ShutdownModule() override
   {
-    FCoreDelegates::OnPostEngineInit.Remove(PostEngineInitHandle);
+    FCoreDelegates::GetOnPostEngineInit().Remove(PostEngineInitHandle);
 
     if (UObjectInitialized())
     {
@@ -49,16 +51,11 @@ public:
       UToolMenus::UnregisterOwner(this);
       if (UToolMenus* ToolMenus = UToolMenus::TryGet())
       {
-        ToolMenus->RemoveSection(MCPServerUI::Private::StatusBarToolBarName, MCPServerUI::Private::SectionName);
+        ToolMenus->RemoveSection(MCPServerUI::Private::LevelEditorStatusBarToolBarName, MCPServerUI::Private::SectionName);
       }
     }
 
-    if (Controller.IsValid())
-    {
-      Controller->Shutdown();
-      Controller.Reset();
-    }
-
+    Controller.Reset();
     FMCPServerUIStyle::Shutdown();
   }
 
@@ -69,11 +66,14 @@ private:
 
     FToolMenuOwnerScoped OwnerScoped(this);
 
-    UToolMenu* StatusBarToolBar = UToolMenus::Get()->ExtendMenu(StatusBarToolBarName);
-    FToolMenuSection& Section = StatusBarToolBar->AddSection(SectionName, TAttribute<FText>(), FToolMenuInsert(NAME_None, EToolMenuInsertType::First));
+    UToolMenu* StatusBarToolBar = UToolMenus::Get()->ExtendMenu(LevelEditorStatusBarToolBarName);
+    FToolMenuSection& Section = StatusBarToolBar->AddSection(
+      SectionName,
+      TAttribute<FText>(),
+      FToolMenuInsert(NAME_None, EToolMenuInsertType::First));
 
-    // The status bar menu is generated once per status bar (level editor, asset editors, ...), so
-    // create a fresh widget each time rather than sharing a single instance.
+    // A dynamic entry builds a new widget each time the menu is regenerated. A single shared widget instance can't be
+    // parented into more than one generated tool bar.
     const TWeakPtr<FMCPServerController> WeakController = Controller;
     Section.AddDynamicEntry(EntryName, FNewToolMenuSectionDelegate::CreateLambda([WeakController](FToolMenuSection& InSection)
     {
@@ -91,43 +91,34 @@ private:
   }
 
   /**
-   * Sections inserted with EToolMenuInsertType::First are laid out in the order they were added, so another
-   * module that also asks for "First" could end up left of us. Once all modules have loaded, make sure our
-   * section is the very first one so the controls sit at the leftmost position of the status bar tool bar.
+   * Insights, LiveLinkHub and MultiUser also insert their sections as "First", and ToolMenus keeps "First" sections in
+   * the order they were added (UToolMenu::FindInsertIndex). Diagnostics is inserted before Insights. Moving our section
+   * to the front of the array keeps us left of all of them, and sections added later are appended after us.
+   * This runs once more at PostEngineInit for sections added between our registration and then.
    */
   void MoveSectionToFront()
   {
     using namespace MCPServerUI::Private;
 
     UToolMenus* ToolMenus = UToolMenus::TryGet();
-    UToolMenu* StatusBarToolBar = ToolMenus ? ToolMenus->FindMenu(StatusBarToolBarName) : nullptr;
+    UToolMenu* StatusBarToolBar = ToolMenus ? ToolMenus->FindMenu(LevelEditorStatusBarToolBarName) : nullptr;
     if (!StatusBarToolBar)
     {
       return;
     }
 
-    const int32 Index = StatusBarToolBar->Sections.IndexOfByPredicate([](const FToolMenuSection& Section)
+    const int32 SectionIndex = StatusBarToolBar->Sections.IndexOfByPredicate([](const FToolMenuSection& Section)
     {
       return Section.Name == SectionName;
     });
 
-    if (Index > 0)
+    if (SectionIndex > 0)
     {
-      FToolMenuSection Section = StatusBarToolBar->Sections[Index];
-      StatusBarToolBar->Sections.RemoveAt(Index);
+      FToolMenuSection Section = StatusBarToolBar->Sections[SectionIndex];
+      StatusBarToolBar->Sections.RemoveAt(SectionIndex);
       StatusBarToolBar->Sections.Insert(MoveTemp(Section), 0);
       ToolMenus->RefreshAllWidgets();
     }
-  }
-
-  void OnPostEngineInit()
-  {
-    if (Controller.IsValid())
-    {
-      // The ModelContextProtocol settings class may not have existed when we started up.
-      Controller->SyncPortFromMCPSettings();
-    }
-    MoveSectionToFront();
   }
 
   TSharedPtr<FMCPServerController> Controller;

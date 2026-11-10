@@ -14,10 +14,11 @@ public class MCPServerUI : ModuleRules
       "CoreUObject",
       "Engine",
       "InputCore",
+      "ModelContextProtocol",
+      "ModelContextProtocolEngine",
       "Projects",
       "Slate",
       "SlateCore",
-      "Sockets",
       "ToolMenus",
       "UnrealEd",
     });

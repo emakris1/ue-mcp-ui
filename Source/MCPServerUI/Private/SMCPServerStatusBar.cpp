@@ -17,16 +17,6 @@
 
 namespace MCPServerUI::Private
 {
-  static const FButtonStyle& GetStatusBarButtonStyle()
-  {
-    static const FName StatusBarButton(TEXT("StatusBar.StatusBarButton"));
-    static const FName SimpleButton(TEXT("SimpleButton"));
-    const ISlateStyle& AppStyle = FAppStyle::Get();
-    return AppStyle.HasWidgetStyle<FButtonStyle>(StatusBarButton)
-      ? AppStyle.GetWidgetStyle<FButtonStyle>(StatusBarButton)
-      : AppStyle.GetWidgetStyle<FButtonStyle>(SimpleButton);
-  }
-
   static FText PortAsText(int32 Port)
   {
     return FText::AsNumber(Port, &FNumberFormattingOptions::DefaultNoGrouping());
@@ -37,7 +27,8 @@ void SMCPServerStatusBar::Construct(const FArguments& InArgs, const TSharedRef<F
 {
   Controller = InController;
 
-  const FButtonStyle& ButtonStyle = MCPServerUI::Private::GetStatusBarButtonStyle();
+  // Same button style as the other status bar buttons (Content Drawer, Output Log, ...) so the controls blend in.
+  const FButtonStyle& StatusBarButtonStyle = FAppStyle::Get().GetWidgetStyle<FButtonStyle>("StatusBar.StatusBarButton");
   const FMargin ButtonPadding(6.0f, 2.0f);
 
   ChildSlot
@@ -50,7 +41,7 @@ void SMCPServerStatusBar::Construct(const FArguments& InArgs, const TSharedRef<F
     .VAlign(VAlign_Center)
     [
       SNew(SButton)
-      .ButtonStyle(&ButtonStyle)
+      .ButtonStyle(&StatusBarButtonStyle)
       .ContentPadding(ButtonPadding)
       .IsEnabled(this, &SMCPServerStatusBar::IsToggleEnabled)
       .ToolTipText(this, &SMCPServerStatusBar::GetToggleToolTip)
@@ -114,7 +105,7 @@ void SMCPServerStatusBar::Construct(const FArguments& InArgs, const TSharedRef<F
     .Padding(0.0f, 0.0f, 4.0f, 0.0f)
     [
       SNew(SButton)
-      .ButtonStyle(&ButtonStyle)
+      .ButtonStyle(&StatusBarButtonStyle)
       .ContentPadding(ButtonPadding)
       .ToolTipText(this, &SMCPServerStatusBar::GetPortToolTip)
       .OnClicked(this, &SMCPServerStatusBar::OnPortClicked)
@@ -143,150 +134,147 @@ void SMCPServerStatusBar::Construct(const FArguments& InArgs, const TSharedRef<F
 
 FReply SMCPServerStatusBar::OnToggleClicked()
 {
-  if (const TSharedPtr<FMCPServerController> Pinned = Controller.Pin())
+  if (const TSharedPtr<FMCPServerController> PinnedController = Controller.Pin())
   {
-    Pinned->ToggleServer();
+    PinnedController->ToggleServer();
   }
   return FReply::Handled();
 }
 
 FReply SMCPServerStatusBar::OnPortClicked()
 {
-  // Keep ourselves and the controller alive while the modal loop runs.
-  const TSharedRef<SWidget> KeepAlive = AsShared();
-  const TSharedPtr<FMCPServerController> Pinned = Controller.Pin();
-  if (!Pinned.IsValid())
+  // The modal loop keeps ticking Slate, and a tool menu refresh during it could destroy this widget. Hold references so
+  // neither we nor the controller disappear before the dialog returns.
+  const TSharedRef<SWidget> KeepThisWidgetAlive = AsShared();
+  const TSharedPtr<FMCPServerController> PinnedController = Controller.Pin();
+  if (!PinnedController.IsValid())
   {
     return FReply::Handled();
   }
 
-  const bool bServerRunning = Pinned->IsRunning() || Pinned->GetState() == EMCPServerState::Starting;
-  const TOptional<int32> NewPort = SMCPPortDialog::ShowModal(Pinned->GetPort(), bServerRunning, KeepAlive);
+  const TOptional<int32> NewPort =
+    SMCPPortDialog::ShowModal(PinnedController->GetPort(), PinnedController->IsRunning(), KeepThisWidgetAlive);
   if (NewPort.IsSet())
   {
-    Pinned->SetPort(NewPort.GetValue());
+    PinnedController->SetPort(NewPort.GetValue());
   }
   return FReply::Handled();
 }
 
 bool SMCPServerStatusBar::IsToggleEnabled() const
 {
-  const TSharedPtr<FMCPServerController> Pinned = Controller.Pin();
-  return Pinned.IsValid() && Pinned->GetState() != EMCPServerState::Unavailable && !Pinned->IsTransitioning();
+  const TSharedPtr<FMCPServerController> PinnedController = Controller.Pin();
+  return PinnedController.IsValid() && PinnedController->GetState() != EMCPServerState::Unavailable;
 }
 
 const FSlateBrush* SMCPServerStatusBar::GetToggleIcon() const
 {
-  const TSharedPtr<FMCPServerController> Pinned = Controller.Pin();
-  const bool bShowStop = Pinned.IsValid() && (Pinned->IsRunning() || Pinned->GetState() == EMCPServerState::Stopping);
+  const TSharedPtr<FMCPServerController> PinnedController = Controller.Pin();
+  const bool bShowStop = PinnedController.IsValid() && PinnedController->IsRunning();
   return FMCPServerUIStyle::Get().GetBrush(bShowStop ? "MCPServerUI.Stop" : "MCPServerUI.Start");
 }
 
 FText SMCPServerStatusBar::GetToggleLabel() const
 {
-  const TSharedPtr<FMCPServerController> Pinned = Controller.Pin();
-  const bool bShowStop = Pinned.IsValid() && (Pinned->IsRunning() || Pinned->GetState() == EMCPServerState::Stopping);
+  const TSharedPtr<FMCPServerController> PinnedController = Controller.Pin();
+  const bool bShowStop = PinnedController.IsValid() && PinnedController->IsRunning();
   return bShowStop ? LOCTEXT("StopLabel", "Stop MCP") : LOCTEXT("StartLabel", "Start MCP");
 }
 
 FText SMCPServerStatusBar::GetToggleToolTip() const
 {
-  const TSharedPtr<FMCPServerController> Pinned = Controller.Pin();
-  if (!Pinned.IsValid() || Pinned->GetState() == EMCPServerState::Unavailable)
+  const TSharedPtr<FMCPServerController> PinnedController = Controller.Pin();
+  if (!PinnedController.IsValid() || PinnedController->GetState() == EMCPServerState::Unavailable)
   {
-    return LOCTEXT("ToggleUnavailableTip", "The ModelContextProtocol console commands are not available. Enable the Model Context Protocol plugin and restart the editor.");
+    return LOCTEXT("ToggleUnavailableTip", "The Model Context Protocol module isn't loaded.");
   }
-  if (Pinned->IsRunning())
+  if (PinnedController->IsRunning())
   {
-    return LOCTEXT("StopTip", "Stop the Model Context Protocol server (ModelContextProtocol.StopServer).");
+    return LOCTEXT("StopTip", "Stop the Model Context Protocol server.");
   }
-  return FText::Format(LOCTEXT("StartTip", "Start the Model Context Protocol server on port {0} (ModelContextProtocol.StartServer {0})."),
-    MCPServerUI::Private::PortAsText(Pinned->GetPort()));
+  return FText::Format(
+    LOCTEXT("StartTip", "Start the Model Context Protocol server at {0}."),
+    FText::FromString(PinnedController->GetServerUrl()));
 }
 
 FSlateColor SMCPServerStatusBar::GetStatusColor() const
 {
-  const TSharedPtr<FMCPServerController> Pinned = Controller.Pin();
-  if (!Pinned.IsValid())
+  static const FLinearColor RunningColor(0.15f, 0.75f, 0.3f);
+  static const FLinearColor StoppedColor(0.4f, 0.4f, 0.4f);
+  static const FLinearColor ErrorColor(0.85f, 0.2f, 0.2f);
+
+  const TSharedPtr<FMCPServerController> PinnedController = Controller.Pin();
+  if (!PinnedController.IsValid())
   {
-    return FLinearColor(0.4f, 0.4f, 0.4f);
+    return StoppedColor;
   }
 
-  switch (Pinned->GetState())
+  switch (PinnedController->GetState())
   {
   case EMCPServerState::Running:
-    return FLinearColor(0.15f, 0.75f, 0.3f);
-  case EMCPServerState::Starting:
-  case EMCPServerState::Stopping:
-    return FLinearColor(0.95f, 0.7f, 0.1f);
+    return RunningColor;
   case EMCPServerState::Unavailable:
-    return FLinearColor(0.85f, 0.2f, 0.2f);
+    return ErrorColor;
   case EMCPServerState::Stopped:
   default:
-    return Pinned->GetLastError().IsEmpty() ? FLinearColor(0.4f, 0.4f, 0.4f) : FLinearColor(0.85f, 0.2f, 0.2f);
+    return PinnedController->GetLastError().IsEmpty() ? StoppedColor : ErrorColor;
   }
 }
 
 FText SMCPServerStatusBar::GetStatusLabel() const
 {
-  const TSharedPtr<FMCPServerController> Pinned = Controller.Pin();
-  if (!Pinned.IsValid())
+  const TSharedPtr<FMCPServerController> PinnedController = Controller.Pin();
+  if (!PinnedController.IsValid())
   {
     return FText::GetEmpty();
   }
 
-  switch (Pinned->GetState())
+  switch (PinnedController->GetState())
   {
-  case EMCPServerState::Running:     return LOCTEXT("StatusRunning", "Running");
-  case EMCPServerState::Starting:    return LOCTEXT("StatusStarting", "Starting...");
-  case EMCPServerState::Stopping:    return LOCTEXT("StatusStopping", "Stopping...");
-  case EMCPServerState::Unavailable: return LOCTEXT("StatusUnavailable", "Unavailable");
+  case EMCPServerState::Running:
+    return LOCTEXT("StatusRunning", "Running");
+  case EMCPServerState::Unavailable:
+    return LOCTEXT("StatusUnavailable", "Unavailable");
   case EMCPServerState::Stopped:
-  default:                           return LOCTEXT("StatusStopped", "Stopped");
+  default:
+    return PinnedController->GetLastError().IsEmpty()
+      ? LOCTEXT("StatusStopped", "Stopped")
+      : LOCTEXT("StatusFailed", "Failed");
   }
 }
 
 FText SMCPServerStatusBar::GetStatusToolTip() const
 {
-  const TSharedPtr<FMCPServerController> Pinned = Controller.Pin();
-  if (!Pinned.IsValid())
+  const TSharedPtr<FMCPServerController> PinnedController = Controller.Pin();
+  if (!PinnedController.IsValid())
   {
     return FText::GetEmpty();
   }
 
-  const FText Address = FText::FromString(Pinned->GetServerAddress());
-  FText Description;
-  switch (Pinned->GetState())
+  const FText ServerUrl = FText::FromString(PinnedController->GetServerUrl());
+  switch (PinnedController->GetState())
   {
   case EMCPServerState::Running:
-    Description = FText::Format(LOCTEXT("TipRunning", "MCP server is listening on {0}."), Address);
-    break;
-  case EMCPServerState::Starting:
-    Description = FText::Format(LOCTEXT("TipStarting", "Waiting for the MCP server to listen on {0}..."), Address);
-    break;
-  case EMCPServerState::Stopping:
-    Description = LOCTEXT("TipStopping", "Waiting for the MCP server to shut down...");
-    break;
+    return FText::Format(LOCTEXT("TipRunning", "MCP server is running at {0}."), ServerUrl);
   case EMCPServerState::Unavailable:
-    Description = LOCTEXT("TipUnavailable", "The Model Context Protocol plugin is not loaded, so the server cannot be controlled.");
-    break;
+    return LOCTEXT("TipUnavailable", "The Model Context Protocol module isn't loaded, so the server can't be controlled.");
   case EMCPServerState::Stopped:
   default:
-    Description = FText::Format(LOCTEXT("TipStopped", "MCP server is not running (nothing is listening on {0})."), Address);
-    break;
+    if (!PinnedController->GetLastError().IsEmpty())
+    {
+      return FText::Format(
+        LOCTEXT("TipFailed", "MCP server failed to start at {0}:\n{1}"),
+        ServerUrl,
+        PinnedController->GetLastError());
+    }
+    return LOCTEXT("TipStopped", "MCP server is not running.");
   }
-
-  if (!Pinned->GetLastError().IsEmpty())
-  {
-    return FText::Format(LOCTEXT("TipWithError", "{0}\n\n{1}"), Description, Pinned->GetLastError());
-  }
-  return Description;
 }
 
 FText SMCPServerStatusBar::GetPortLabel() const
 {
-  const TSharedPtr<FMCPServerController> Pinned = Controller.Pin();
-  return Pinned.IsValid() ? MCPServerUI::Private::PortAsText(Pinned->GetPort()) : FText::GetEmpty();
+  const TSharedPtr<FMCPServerController> PinnedController = Controller.Pin();
+  return PinnedController.IsValid() ? MCPServerUI::Private::PortAsText(PinnedController->GetPort()) : FText::GetEmpty();
 }
 
 FText SMCPServerStatusBar::GetPortToolTip() const

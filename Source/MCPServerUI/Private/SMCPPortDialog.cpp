@@ -16,18 +16,6 @@
 
 #define LOCTEXT_NAMESPACE "MCPServerUI"
 
-namespace MCPServerUI::Private
-{
-  static const FButtonStyle& GetDialogButtonStyle(FName PreferredStyle)
-  {
-    static const FName FallbackStyle(TEXT("Button"));
-    const ISlateStyle& AppStyle = FAppStyle::Get();
-    return AppStyle.HasWidgetStyle<FButtonStyle>(PreferredStyle)
-      ? AppStyle.GetWidgetStyle<FButtonStyle>(PreferredStyle)
-      : AppStyle.GetWidgetStyle<FButtonStyle>(FallbackStyle);
-  }
-}
-
 TOptional<int32> SMCPPortDialog::ShowModal(int32 CurrentPort, bool bServerRunning, const TSharedPtr<const SWidget>& ParentWidget)
 {
   const TSharedRef<SWindow> Window = SNew(SWindow)
@@ -119,7 +107,7 @@ void SMCPPortDialog::Construct(const FArguments& InArgs)
           .Padding(0.0f, 0.0f, 8.0f, 0.0f)
           [
             SNew(SButton)
-            .ButtonStyle(&MCPServerUI::Private::GetDialogButtonStyle(TEXT("PrimaryButton")))
+            .ButtonStyle(&FAppStyle::Get().GetWidgetStyle<FButtonStyle>("PrimaryButton"))
             .Text(LOCTEXT("Apply", "Apply"))
             .HAlign(HAlign_Center)
             .IsEnabled(this, &SMCPPortDialog::CanApply)
@@ -129,7 +117,7 @@ void SMCPPortDialog::Construct(const FArguments& InArgs)
           .AutoWidth()
           [
             SNew(SButton)
-            .ButtonStyle(&MCPServerUI::Private::GetDialogButtonStyle(TEXT("Button")))
+            .ButtonStyle(&FAppStyle::Get().GetWidgetStyle<FButtonStyle>("Button"))
             .Text(LOCTEXT("Cancel", "Cancel"))
             .HAlign(HAlign_Center)
             .OnClicked(this, &SMCPPortDialog::OnCancelClicked)

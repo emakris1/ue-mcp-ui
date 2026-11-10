@@ -3,70 +3,43 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Containers/Ticker.h"
 
-class FMCPServerProbe;
-class FRunnableThread;
+class FModelContextProtocolServer;
 
 enum class EMCPServerState : uint8
 {
-  /** The ModelContextProtocol console commands are not registered (plugin disabled / not loaded). */
+  /** The ModelContextProtocol module isn't loaded, e.g. while the editor is shutting down. */
   Unavailable,
   Stopped,
-  Starting,
   Running,
-  Stopping,
 };
 
 /**
- * Drives the engine's Model Context Protocol server through its console commands
- * (ModelContextProtocol.StartServer / ModelContextProtocol.StopServer) and tracks whether
- * the server is actually listening by probing 127.0.0.1:<Port> on a background thread.
+ * Starts and stops the engine's Model Context Protocol server through IModelContextProtocolModule and keeps the port in
+ * UModelContextProtocolSettings, so the status bar, Auto Start Server and the editor's settings panel all agree.
  */
-class FMCPServerController : public TSharedFromThis<FMCPServerController>
+class FMCPServerController
 {
 public:
-  static constexpr int32 DefaultPort = 8000;
-
-  FMCPServerController();
-  ~FMCPServerController();
-
-  void Initialize();
-  void Shutdown();
-
-  /** Re-reads the port from the ModelContextProtocol settings, if they can be found. */
-  void SyncPortFromMCPSettings();
-
   void StartServer();
   void StopServer();
   void ToggleServer();
 
-  /** Changes the port, persists it and restarts the server on the new port if it was running. */
+  /** Saves the port to the MCP settings and restarts the server on it if it's running. */
   void SetPort(int32 NewPort);
 
-  EMCPServerState GetState() const { return State; }
-  int32 GetPort() const { return Port; }
+  EMCPServerState GetState() const;
+  bool IsRunning() const { return GetState() == EMCPServerState::Running; }
+
+  /** The port the server is listening on while running, otherwise the port it will start on. */
+  int32 GetPort() const;
+  FString GetServerUrl() const;
+
+  /** Why the last start attempt failed. Empty if it succeeded or the server was stopped since. */
   const FText& GetLastError() const { return LastError; }
 
-  bool IsRunning() const { return State == EMCPServerState::Running; }
-  bool IsTransitioning() const { return State == EMCPServerState::Starting || State == EMCPServerState::Stopping; }
-  bool AreCommandsAvailable() const;
-  FString GetServerAddress() const;
-
 private:
-  bool Tick(float DeltaTime);
-  void HandleProbeResult(int32 ProbedPort, bool bListening);
-  void BeginTransition(EMCPServerState NewState);
-  void UpdateProbeTarget();
-  bool ExecuteConsoleCommand(const FString& Command);
-  void SavePort() const;
+  FModelContextProtocolServer* FindRunningServer() const;
 
-  EMCPServerState State = EMCPServerState::Stopped;
-  int32 Port = DefaultPort;
-  double TransitionStartTime = 0.0;
   FText LastError;
-
-  FTSTicker::FDelegateHandle TickHandle;
-  TUniquePtr<FMCPServerProbe> Probe;
-  FRunnableThread* ProbeThread = nullptr;
 };

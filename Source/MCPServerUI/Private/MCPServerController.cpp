@@ -2,362 +2,143 @@
 
 #include "MCPServerController.h"
 
-#include "CoreGlobals.h"
-#include "Editor.h"
-#include "HAL/Event.h"
-#include "HAL/IConsoleManager.h"
-#include "HAL/PlatformProcess.h"
-#include "HAL/Runnable.h"
-#include "HAL/RunnableThread.h"
-#include "IPAddress.h"
-#include "Misc/ConfigCacheIni.h"
-#include "Misc/ScopeLock.h"
-#include "SocketSubsystem.h"
-#include "Sockets.h"
-#include "UObject/Class.h"
-#include "UObject/UObjectGlobals.h"
-#include "UObject/UnrealType.h"
+#include "IModelContextProtocolModule.h"
+#include "ModelContextProtocol.h"
+#include "ModelContextProtocolServer.h"
+#include "ModelContextProtocolSettings.h"
 
-#include <atomic>
+#include "CoreGlobals.h"
+#include "Logging/LogVerbosity.h"
+#include "Misc/OutputDevice.h"
+#include "Misc/OutputDeviceRedirector.h"
 
 #define LOCTEXT_NAMESPACE "MCPServerUI"
 
-DEFINE_LOG_CATEGORY_STATIC(LogMCPServerUI, Log, All);
-
 namespace MCPServerUI::Private
 {
-  static const TCHAR* StartServerCommand = TEXT("ModelContextProtocol.StartServer");
-  static const TCHAR* StopServerCommand = TEXT("ModelContextProtocol.StopServer");
-
-  static const TCHAR* ConfigSection = TEXT("MCPServerUI");
-  static const TCHAR* ConfigPortKey = TEXT("Port");
-
-  /** How long to wait for the server to start/stop listening before giving up. */
-  static constexpr double TransitionTimeoutSeconds = 6.0;
-  static constexpr uint32 IdleProbeIntervalMs = 2000;
-  static constexpr uint32 TransitionProbeIntervalMs = 250;
-
-  /** Returns true if something accepts TCP connections on 127.0.0.1:InPort. Blocking; call off the game thread. */
-  static bool IsLocalPortListening(int32 InPort)
-  {
-    ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
-    if (!SocketSubsystem)
-    {
-      return false;
-    }
-
-    TSharedRef<FInternetAddr> Address = SocketSubsystem->CreateInternetAddr();
-    bool bIsValidIp = false;
-    Address->SetIp(TEXT("127.0.0.1"), bIsValidIp);
-    Address->SetPort(InPort);
-    if (!bIsValidIp)
-    {
-      return false;
-    }
-
-    FSocket* Socket = SocketSubsystem->CreateSocket(NAME_Stream, TEXT("MCPServerUI port probe"), Address->GetProtocolType());
-    if (!Socket)
-    {
-      return false;
-    }
-
-    const bool bConnected = Socket->Connect(*Address);
-    Socket->Close();
-    SocketSubsystem->DestroySocket(Socket);
-    return bConnected;
-  }
-
   /**
-   * The ModelContextProtocol settings live in the ModelContextProtocolEngine module. We look them up by
-   * reflection so this plugin does not need to compile against that (experimental) module's headers.
+   * Captures the first error logged on the game thread while the server is starting.
+   *
+   * FModelContextProtocolServer::IsServerRunning() only reports that its HTTP routes exist. If the port is already taken,
+   * the HTTP listener logs "unable to bind" and the server still claims to be running, so the log is the only signal that
+   * the start actually failed. The bind happens synchronously inside StartServer, so scoping the capture to that call is
+   * enough to attribute any error to it.
    */
-  static UObject* FindMCPSettingsObject()
+  class FServerStartErrorCapture final : public FOutputDevice
   {
-    static const TCHAR* CandidateClassPaths[] =
+  public:
+    FServerStartErrorCapture()
     {
-      TEXT("/Script/ModelContextProtocolEngine.ModelContextProtocolSettings"),
-      TEXT("/Script/ModelContextProtocol.ModelContextProtocolSettings"),
-    };
+      GLog->AddOutputDevice(this);
+    }
 
-    for (const TCHAR* ClassPath : CandidateClassPaths)
+    virtual ~FServerStartErrorCapture() override
     {
-      if (UClass* SettingsClass = FindObject<UClass>(nullptr, ClassPath))
+      GLog->RemoveOutputDevice(this);
+    }
+
+    bool HasError() const
+    {
+      return !FirstErrorMessage.IsEmpty();
+    }
+
+    const FString& GetFirstErrorMessage() const
+    {
+      return FirstErrorMessage;
+    }
+
+    virtual void Serialize(const TCHAR* Message, ELogVerbosity::Type Verbosity, const FName& Category) override
+    {
+      // Other threads keep logging while we wait. Only the game thread is inside our StartServer call, and filtering on
+      // it also means FirstErrorMessage is only ever touched by one thread.
+      if (!IsInGameThread())
       {
-        return SettingsClass->GetDefaultObject();
+        return;
       }
-    }
-    return nullptr;
-  }
 
-  static FNumericProperty* FindPortProperty(const UClass* SettingsClass)
-  {
-    static const FName CandidateNames[] =
-    {
-      TEXT("ServerPort"),
-      TEXT("ServerPortNumber"),
-      TEXT("PortNumber"),
-      TEXT("Port"),
-      TEXT("HttpServerPort"),
-      TEXT("HttpPort"),
-    };
-
-    for (const FName& Name : CandidateNames)
-    {
-      FNumericProperty* Property = FindFProperty<FNumericProperty>(SettingsClass, Name);
-      if (Property && Property->IsInteger())
+      if ((Verbosity & ELogVerbosity::VerbosityMask) > ELogVerbosity::Error)
       {
-        return Property;
+        return;
       }
-    }
 
-    for (TFieldIterator<FNumericProperty> It(SettingsClass); It; ++It)
-    {
-      if (It->IsInteger() && It->GetName().Contains(TEXT("Port")))
+      // LogHttpListener is declared in a private HTTPServer header, so it can only be matched by name.
+      static const FName HttpListenerCategory(TEXT("LogHttpListener"));
+      const bool bIsServerStartCategory =
+        Category == HttpListenerCategory || Category == LogModelContextProtocol.GetCategoryName();
+
+      if (bIsServerStartCategory && FirstErrorMessage.IsEmpty())
       {
-        return *It;
-      }
-    }
-    return nullptr;
-  }
-
-  static bool TryReadMCPSettingsPort(int32& OutPort)
-  {
-    UObject* Settings = FindMCPSettingsObject();
-    FNumericProperty* PortProperty = Settings ? FindPortProperty(Settings->GetClass()) : nullptr;
-    if (!PortProperty)
-    {
-      return false;
-    }
-
-    const int64 Value = PortProperty->GetSignedIntPropertyValue(PortProperty->ContainerPtrToValuePtr<void>(Settings));
-    if (Value < 1 || Value > 65535)
-    {
-      return false;
-    }
-    OutPort = static_cast<int32>(Value);
-    return true;
-  }
-
-  static bool TryWriteMCPSettingsPort(int32 InPort)
-  {
-    UObject* Settings = FindMCPSettingsObject();
-    FNumericProperty* PortProperty = Settings ? FindPortProperty(Settings->GetClass()) : nullptr;
-    if (!PortProperty)
-    {
-      return false;
-    }
-
-    PortProperty->SetIntPropertyValue(PortProperty->ContainerPtrToValuePtr<void>(Settings), static_cast<int64>(InPort));
-
-    if (PortProperty->HasAnyPropertyFlags(CPF_Config))
-    {
-      if (Settings->GetClass()->HasAnyClassFlags(CLASS_DefaultConfig))
-      {
-        Settings->TryUpdateDefaultConfigFile();
-      }
-      else
-      {
-        Settings->SaveConfig();
+        FirstErrorMessage = Message;
       }
     }
 
-    UE_LOG(LogMCPServerUI, Log, TEXT("Set %s.%s to %d"), *Settings->GetClass()->GetName(), *PortProperty->GetName(), InPort);
-    return true;
-  }
-}
-
-/** Background thread that repeatedly checks whether the configured port is accepting connections. */
-class FMCPServerProbe : public FRunnable
-{
-public:
-  FMCPServerProbe(int32 InPort)
-    : WakeEvent(FPlatformProcess::GetSynchEventFromPool(false))
-    , TargetPort(InPort)
-  {
-  }
-
-  virtual ~FMCPServerProbe() override
-  {
-    FPlatformProcess::ReturnSynchEventToPool(WakeEvent);
-  }
-
-  void SetTarget(int32 InPort, uint32 InIntervalMs)
-  {
-    TargetPort = InPort;
-    IntervalMs = InIntervalMs;
-  }
-
-  /** Wakes the thread so it probes immediately instead of waiting for the next interval. */
-  void ProbeNow()
-  {
-    WakeEvent->Trigger();
-  }
-
-  bool ConsumeResult(int32& OutPort, bool& bOutListening)
-  {
-    FScopeLock Lock(&ResultLock);
-    if (!bHasNewResult)
+    // Lets the redirector call us synchronously from the logging thread instead of buffering the message until after
+    // StartServer has returned.
+    virtual bool CanBeUsedOnAnyThread() const override
     {
-      return false;
+      return true;
     }
-    bHasNewResult = false;
-    OutPort = ResultPort;
-    bOutListening = bResultListening;
-    return true;
-  }
 
-  virtual uint32 Run() override
-  {
-    while (!bStopRequested)
+    virtual bool CanBeUsedOnMultipleThreads() const override
     {
-      const int32 Port = TargetPort.load();
-      const bool bListening = MCPServerUI::Private::IsLocalPortListening(Port);
-      {
-        FScopeLock Lock(&ResultLock);
-        ResultPort = Port;
-        bResultListening = bListening;
-        bHasNewResult = true;
-      }
-
-      if (!bStopRequested)
-      {
-        WakeEvent->Wait(IntervalMs.load());
-      }
+      return true;
     }
-    return 0;
-  }
 
-  virtual void Stop() override
-  {
-    bStopRequested = true;
-    WakeEvent->Trigger();
-  }
-
-private:
-  FEvent* WakeEvent;
-  std::atomic<int32> TargetPort;
-  std::atomic<uint32> IntervalMs { MCPServerUI::Private::IdleProbeIntervalMs };
-  std::atomic<bool> bStopRequested { false };
-
-  FCriticalSection ResultLock;
-  int32 ResultPort = 0;
-  bool bResultListening = false;
-  bool bHasNewResult = false;
-};
-
-FMCPServerController::FMCPServerController() = default;
-
-FMCPServerController::~FMCPServerController()
-{
-  Shutdown();
-}
-
-void FMCPServerController::Initialize()
-{
-  using namespace MCPServerUI::Private;
-
-  int32 SavedPort = DefaultPort;
-  if (TryReadMCPSettingsPort(SavedPort))
-  {
-    Port = SavedPort;
-  }
-  else if (GConfig && GConfig->GetInt(ConfigSection, ConfigPortKey, SavedPort, GEditorPerProjectIni) && SavedPort >= 1 && SavedPort <= 65535)
-  {
-    Port = SavedPort;
-  }
-
-  State = AreCommandsAvailable() ? EMCPServerState::Stopped : EMCPServerState::Unavailable;
-
-  Probe = MakeUnique<FMCPServerProbe>(Port);
-  ProbeThread = FRunnableThread::Create(Probe.Get(), TEXT("MCPServerUIProbe"), 0, TPri_BelowNormal);
-
-  TickHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateSP(this, &FMCPServerController::Tick), 0.1f);
-}
-
-void FMCPServerController::Shutdown()
-{
-  if (TickHandle.IsValid())
-  {
-    FTSTicker::GetCoreTicker().RemoveTicker(TickHandle);
-    TickHandle.Reset();
-  }
-
-  if (ProbeThread)
-  {
-    ProbeThread->Kill(true);
-    delete ProbeThread;
-    ProbeThread = nullptr;
-  }
-  Probe.Reset();
-}
-
-void FMCPServerController::SyncPortFromMCPSettings()
-{
-  int32 SettingsPort = Port;
-  if (MCPServerUI::Private::TryReadMCPSettingsPort(SettingsPort) && SettingsPort != Port && !IsRunning() && !IsTransitioning())
-  {
-    Port = SettingsPort;
-    SavePort();
-    UpdateProbeTarget();
-  }
-}
-
-bool FMCPServerController::AreCommandsAvailable() const
-{
-  return IConsoleManager::Get().FindConsoleObject(MCPServerUI::Private::StartServerCommand) != nullptr
-    && IConsoleManager::Get().FindConsoleObject(MCPServerUI::Private::StopServerCommand) != nullptr;
-}
-
-FString FMCPServerController::GetServerAddress() const
-{
-  return FString::Printf(TEXT("127.0.0.1:%d"), Port);
+  private:
+    FString FirstErrorMessage;
+  };
 }
 
 void FMCPServerController::StartServer()
 {
-  if (!AreCommandsAvailable())
+  IModelContextProtocolModule* McpModule = IModelContextProtocolModule::Get();
+  if (!McpModule)
   {
-    State = EMCPServerState::Unavailable;
+    LastError = LOCTEXT("ModuleUnavailable", "The Model Context Protocol module isn't loaded.");
     return;
   }
-  if (State == EMCPServerState::Running || IsTransitioning())
+
+  // Use the configured URL path as well as the port. The ModelContextProtocol.StartServer console command only takes a
+  // port and would silently fall back to the default path.
+  const uint32 Port = GetDefault<UModelContextProtocolSettings>()->ServerPortNumber;
+  const FString UrlPath = UE::ModelContextProtocol::GetServerUrlPath();
+
+  FString StartErrorMessage;
   {
+    MCPServerUI::Private::FServerStartErrorCapture ErrorCapture;
+    McpModule->StartServer(Port, UrlPath);
+    StartErrorMessage = ErrorCapture.GetFirstErrorMessage();
+  }
+
+  if (!StartErrorMessage.IsEmpty())
+  {
+    // Don't leave the routes registered on a listener that never bound. It would report "running" while serving nothing.
+    McpModule->StopServer();
+    LastError = FText::FromString(StartErrorMessage);
+    return;
+  }
+
+  if (!FindRunningServer())
+  {
+    LastError = LOCTEXT("StartFailed", "The MCP server didn't start. See the Output Log for details.");
     return;
   }
 
   LastError = FText::GetEmpty();
-  if (!ExecuteConsoleCommand(FString::Printf(TEXT("%s %d"), MCPServerUI::Private::StartServerCommand, Port)))
-  {
-    LastError = LOCTEXT("StartCommandFailed", "The StartServer console command was not handled. See the Output Log.");
-    return;
-  }
-  BeginTransition(EMCPServerState::Starting);
 }
 
 void FMCPServerController::StopServer()
 {
-  if (!AreCommandsAvailable())
+  if (IModelContextProtocolModule* McpModule = IModelContextProtocolModule::Get())
   {
-    State = EMCPServerState::Unavailable;
-    return;
+    McpModule->StopServer();
   }
-  if (State != EMCPServerState::Running)
-  {
-    return;
-  }
-
   LastError = FText::GetEmpty();
-  if (!ExecuteConsoleCommand(MCPServerUI::Private::StopServerCommand))
-  {
-    LastError = LOCTEXT("StopCommandFailed", "The StopServer console command was not handled. See the Output Log.");
-    return;
-  }
-  BeginTransition(EMCPServerState::Stopping);
 }
 
 void FMCPServerController::ToggleServer()
 {
-  if (State == EMCPServerState::Running)
+  if (IsRunning())
   {
     StopServer();
   }
@@ -370,137 +151,53 @@ void FMCPServerController::ToggleServer()
 void FMCPServerController::SetPort(int32 NewPort)
 {
   NewPort = FMath::Clamp(NewPort, 1, 65535);
-  if (NewPort == Port)
+
+  UModelContextProtocolSettings* Settings = GetMutableDefault<UModelContextProtocolSettings>();
+  if (Settings->ServerPortNumber != static_cast<uint32>(NewPort))
   {
-    return;
+    Settings->ServerPortNumber = static_cast<uint32>(NewPort);
+    Settings->SaveConfig();
   }
 
-  const bool bRestart = State == EMCPServerState::Running || State == EMCPServerState::Starting;
-  if (bRestart)
+  // Compare against the live port, not the old setting. The server may have been started on another port from the
+  // console or with -ModelContextProtocolPort.
+  const FModelContextProtocolServer* RunningServer = FindRunningServer();
+  if (RunningServer && RunningServer->GetServerPort() != static_cast<uint32>(NewPort))
   {
-    ExecuteConsoleCommand(MCPServerUI::Private::StopServerCommand);
-  }
-
-  Port = NewPort;
-  SavePort();
-  LastError = FText::GetEmpty();
-
-  if (bRestart)
-  {
-    State = EMCPServerState::Stopped;
+    StopServer();
     StartServer();
   }
-  else
-  {
-    State = AreCommandsAvailable() ? EMCPServerState::Stopped : EMCPServerState::Unavailable;
-    UpdateProbeTarget();
-  }
 }
 
-bool FMCPServerController::Tick(float DeltaTime)
+EMCPServerState FMCPServerController::GetState() const
 {
-  if (State == EMCPServerState::Unavailable && AreCommandsAvailable())
+  if (!IModelContextProtocolModule::Get())
   {
-    State = EMCPServerState::Stopped;
+    return EMCPServerState::Unavailable;
   }
-
-  int32 ProbedPort = 0;
-  bool bListening = false;
-  if (Probe && Probe->ConsumeResult(ProbedPort, bListening))
-  {
-    HandleProbeResult(ProbedPort, bListening);
-  }
-  return true;
+  return FindRunningServer() ? EMCPServerState::Running : EMCPServerState::Stopped;
 }
 
-void FMCPServerController::HandleProbeResult(int32 ProbedPort, bool bListening)
+int32 FMCPServerController::GetPort() const
 {
-  if (ProbedPort != Port)
+  if (const FModelContextProtocolServer* RunningServer = FindRunningServer())
   {
-    return; // Stale result from before a port change.
+    return static_cast<int32>(RunningServer->GetServerPort());
   }
-
-  const double Elapsed = FPlatformTime::Seconds() - TransitionStartTime;
-  const bool bTimedOut = Elapsed > MCPServerUI::Private::TransitionTimeoutSeconds;
-
-  switch (State)
-  {
-  case EMCPServerState::Starting:
-    if (bListening)
-    {
-      State = EMCPServerState::Running;
-      LastError = FText::GetEmpty();
-    }
-    else if (bTimedOut)
-    {
-      State = EMCPServerState::Stopped;
-      LastError = FText::Format(LOCTEXT("StartTimedOut", "The server did not start listening on port {0}. See the Output Log for details."), FText::AsNumber(Port, &FNumberFormattingOptions::DefaultNoGrouping()));
-    }
-    break;
-
-  case EMCPServerState::Stopping:
-    if (!bListening)
-    {
-      State = EMCPServerState::Stopped;
-    }
-    else if (bTimedOut)
-    {
-      State = EMCPServerState::Running;
-      LastError = FText::Format(LOCTEXT("StopTimedOut", "Port {0} is still accepting connections after StopServer. Another process may be using it."), FText::AsNumber(Port, &FNumberFormattingOptions::DefaultNoGrouping()));
-    }
-    break;
-
-  default:
-    if (bListening)
-    {
-      State = EMCPServerState::Running;
-    }
-    else
-    {
-      State = AreCommandsAvailable() ? EMCPServerState::Stopped : EMCPServerState::Unavailable;
-    }
-    break;
-  }
-
-  UpdateProbeTarget();
+  return static_cast<int32>(GetDefault<UModelContextProtocolSettings>()->ServerPortNumber);
 }
 
-void FMCPServerController::BeginTransition(EMCPServerState NewState)
+FString FMCPServerController::GetServerUrl() const
 {
-  State = NewState;
-  TransitionStartTime = FPlatformTime::Seconds();
-  UpdateProbeTarget();
-  if (Probe)
-  {
-    Probe->ProbeNow();
-  }
+  // The HTTP server binds to localhost unless [HTTPServer.Listeners] in the engine config says otherwise.
+  return FString::Printf(TEXT("http://localhost:%d%s"), GetPort(), *UE::ModelContextProtocol::GetServerUrlPath());
 }
 
-void FMCPServerController::UpdateProbeTarget()
+FModelContextProtocolServer* FMCPServerController::FindRunningServer() const
 {
-  if (Probe)
-  {
-    using namespace MCPServerUI::Private;
-    Probe->SetTarget(Port, IsTransitioning() ? TransitionProbeIntervalMs : IdleProbeIntervalMs);
-  }
-}
-
-bool FMCPServerController::ExecuteConsoleCommand(const FString& Command)
-{
-  UE_LOG(LogMCPServerUI, Log, TEXT("Executing: %s"), *Command);
-  UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
-  return IConsoleManager::Get().ProcessUserConsoleInput(*Command, *GLog, World);
-}
-
-void FMCPServerController::SavePort() const
-{
-  MCPServerUI::Private::TryWriteMCPSettingsPort(Port);
-
-  if (GConfig)
-  {
-    GConfig->SetInt(MCPServerUI::Private::ConfigSection, MCPServerUI::Private::ConfigPortKey, Port, GEditorPerProjectIni);
-    GConfig->Flush(false, GEditorPerProjectIni);
-  }
+  IModelContextProtocolModule* McpModule = IModelContextProtocolModule::Get();
+  FModelContextProtocolServer* Server = McpModule ? McpModule->GetServer() : nullptr;
+  return Server && Server->IsServerRunning() ? Server : nullptr;
 }
 
 #undef LOCTEXT_NAMESPACE
